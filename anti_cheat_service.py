@@ -1,3 +1,6 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
 from flask import Flask, render_template, g, request
 from flask_socketio import SocketIO, emit
 import cv2
@@ -7,14 +10,13 @@ import base64
 import sqlite3
 import time
 from datetime import datetime, timezone
-import os
 
 # -----------------------
 # CONFIG
 # -----------------------
 DB_PATH = "cheat_logs.db"
-HEAD_THRESHOLD = 20    # Number of frames to trigger head turn alert
-GAZE_THRESHOLD = 15    # Number of frames to trigger gaze alert
+HEAD_THRESHOLD = 4     # Number of frames to trigger head turn alert (approx 2s)
+GAZE_THRESHOLD = 4     # Number of frames to trigger gaze alert (approx 2s)
 MAX_VIOLATIONS = 3     # Max violations before auto-submit
 # -----------------------
 
@@ -262,6 +264,7 @@ def receive_frame(base64_data):
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
         # analyze
+        cv2.imwrite("debug_frame.jpg", frame) # DEBUG: Save frame to check orientation/quality
         processed_frame, info = analyze_face(frame)
 
         # update counters based on analysis
@@ -323,6 +326,16 @@ def receive_frame(base64_data):
                 clients[sid]['disqualified'] = True
                 emit("auto_submit", {"sid": sid, "detail": "Limit pelanggaran tercapai."})
                 log_event(sid, "auto_submit", "Violation limit exceeded")
+
+        # Emit continuous status for calibration/tracking
+        # This helps the frontend know if face is detected or if there are warnings
+        status_payload = {
+            "num_faces": num_faces,
+            "head_alert": head_alert,
+            "gaze_dir": gaze_dir,
+            "status": "Cheating Detected" if reasons else "Normal"
+        }
+        emit("status", status_payload)
 
         # encode processed frame and send back
         _, buf = cv2.imencode(".jpg", processed_frame)

@@ -160,9 +160,9 @@ def analyze_face(frame):
                     right_ratio = (right_pupil.x - right_eye_left.x) / (right_eye_right.x - right_eye_left.x + 1e-6)
                     gaze_ratio = (left_ratio + right_ratio) / 2
 
-                    if gaze_ratio < 0.35:
+                    if gaze_ratio < 0.40:
                         gaze_dir = "Kiri"
-                    elif gaze_ratio > 0.65:
+                    elif gaze_ratio > 0.60:
                         gaze_dir = "Kanan"
                     else:
                         gaze_dir = "Tengah"
@@ -224,6 +224,7 @@ def on_connect():
         'gaze_counter': 0, 
         'violation_count': 0,
         'disqualified': False,
+        'exam_active': False,
         'last_seen': time.time()
     }
     print(f"[CONNECT] {sid}")
@@ -237,6 +238,17 @@ def on_disconnect():
     log_event(sid, "disconnect", "client disconnected")
     clients.pop(sid, None)
 
+@socketio.on("start_exam")
+def on_start_exam(data):
+    sid = request.sid
+    if sid in clients:
+        clients[sid]['exam_active'] = True
+        # Reset counters just in case
+        clients[sid]['head_counter'] = 0
+        clients[sid]['gaze_counter'] = 0
+        print(f"[START EXAM] {sid} - Violation tracking active. Data: {data}")
+        log_event(sid, "start_exam", "User started exam")
+
 @socketio.on("send_frame")
 def receive_frame(base64_data):
     sid = request.sid
@@ -246,6 +258,7 @@ def receive_frame(base64_data):
             'gaze_counter': 0, 
             'violation_count': 0,
             'disqualified': False,
+            'exam_active': False,
             'last_seen': time.time()
         }
     
@@ -271,73 +284,78 @@ def receive_frame(base64_data):
         head_alert = info.get('head_alert', False)
         gaze_dir = info.get('gaze_dir', 'Unknown')
         num_faces = info.get('num_faces', 0)
-
-        # reset internal counters if everything is normal to avoid noise
-        if num_faces == 1 and not head_alert and gaze_dir == "Tengah":
-             clients[sid]['head_counter'] = max(0, clients[sid]['head_counter'] - 1)
-             clients[sid]['gaze_counter'] = max(0, clients[sid]['gaze_counter'] - 1)
-        else:
-            # If no face, we might want to alert too? For now, keep original logic (reset)
-            if num_faces == 0:
-                clients[sid]['head_counter'] = max(0, clients[sid]['head_counter'] - 1)
-                clients[sid]['gaze_counter'] = max(0, clients[sid]['gaze_counter'] - 1)
-            else:
-                if head_alert:
-                    clients[sid]['head_counter'] += 1
-                else:
-                    clients[sid]['head_counter'] = max(0, clients[sid]['head_counter'] - 1)
-
-                if gaze_dir in ("Kiri", "Kanan"):
-                    clients[sid]['gaze_counter'] += 1
-                else:
-                    clients[sid]['gaze_counter'] = max(0, clients[sid]['gaze_counter'] - 1)
-
-        # If counters cross thresholds -> emit cheating_alert + log
+        
+        # Only track violations if exam is active
+        exam_active = clients[sid].get('exam_active', False)
         reasons = []
-        if clients[sid]['head_counter'] > HEAD_THRESHOLD:
-            reasons.append("Menoleh terlalu lama")
-            clients[sid]['head_counter'] = 0 # Reset to require new sustained violation
-            
-        if clients[sid]['gaze_counter'] > GAZE_THRESHOLD:
-            reasons.append("Melihat keluar layar terlalu lama")
-            clients[sid]['gaze_counter'] = 0 # Reset to require new sustained violation
 
-        if num_faces > 1:
-            reasons.append("Multiple faces detected")
-            
-        if reasons:
-            detail = "; ".join(reasons)
-            clients[sid]['violation_count'] += 1
-            current_violations = clients[sid]['violation_count']
-            
-            print(f"[ALERT] {sid} -> {detail} (Violation {current_violations}/{MAX_VIOLATIONS})")
-            log_event(sid, "cheating_alert", f"{detail} ({current_violations})")
-            
-            emit("cheating_alert", {
-                "sid": sid, 
-                "detail": detail, 
-                "violation_count": current_violations,
-                "max_violations": MAX_VIOLATIONS
-            })
+        if exam_active:
+            # reset internal counters if everything is normal to avoid noise
+            if num_faces == 1 and not head_alert and gaze_dir == "Tengah":
+                 clients[sid]['head_counter'] = max(0, clients[sid]['head_counter'] - 1)
+                 clients[sid]['gaze_counter'] = max(0, clients[sid]['gaze_counter'] - 1)
+            else:
+                # If no face, treat as head violation (participant left or turned away completely)
+                if num_faces == 0:
+                    clients[sid]['head_counter'] += 1
+                    clients[sid]['gaze_counter'] = max(0, clients[sid]['gaze_counter'] - 1)
+                else:
+                    if head_alert:
+                        clients[sid]['head_counter'] += 1
+                    else:
+                        clients[sid]['head_counter'] = max(0, clients[sid]['head_counter'] - 1)
 
-            # Check for 3-strike rule
-            if current_violations >= MAX_VIOLATIONS:
-                print(f"[DISQUALIFIED] {sid} reached limit.")
-                clients[sid]['disqualified'] = True
-                emit("auto_submit", {"sid": sid, "detail": "Limit pelanggaran tercapai."})
-                log_event(sid, "auto_submit", "Violation limit exceeded")
+                    if gaze_dir in ("Kiri", "Kanan"):
+                        clients[sid]['gaze_counter'] += 1
+                    else:
+                        clients[sid]['gaze_counter'] = max(0, clients[sid]['gaze_counter'] - 1)
 
+            # If counters cross thresholds -> emit cheating_alert + log
+            if clients[sid]['head_counter'] > HEAD_THRESHOLD:
+                reasons.append("Menoleh terlalu lama")
+                clients[sid]['head_counter'] = 0 # Reset to require new sustained violation
+                
+            if clients[sid]['gaze_counter'] > GAZE_THRESHOLD:
+                reasons.append("Melihat keluar layar terlalu lama")
+                clients[sid]['gaze_counter'] = 0 # Reset to require new sustained violation
+
+            if num_faces > 1:
+                reasons.append("Multiple faces detected")
+                
+            if reasons:
+                detail = "; ".join(reasons)
+                clients[sid]['violation_count'] += 1
+                current_violations = clients[sid]['violation_count']
+                
+                print(f"[ALERT] {sid} -> {detail} (Violation {current_violations}/{MAX_VIOLATIONS})")
+                log_event(sid, "cheating_alert", f"{detail} ({current_violations})")
+                
+                emit("cheating_alert", {
+                    "sid": sid, 
+                    "detail": detail, 
+                    "violation_count": current_violations,
+                    "max_violations": MAX_VIOLATIONS
+                })
+
+                # Check for 3-strike rule
+                if current_violations >= MAX_VIOLATIONS:
+                    print(f"[DISQUALIFIED] {sid} reached limit.")
+                    clients[sid]['disqualified'] = True
+                    emit("auto_submit", {"sid": sid, "detail": "Limit pelanggaran tercapai."})
+                    log_event(sid, "auto_submit", "Violation limit exceeded")
+        
         # Emit continuous status for calibration/tracking
         # This helps the frontend know if face is detected or if there are warnings
         status_payload = {
             "num_faces": num_faces,
             "head_alert": head_alert,
             "gaze_dir": gaze_dir,
-            "status": "Cheating Detected" if reasons else "Normal"
+            "status": "Cheating Detected" if reasons else "Normal",
+            "exam_active": exam_active
         }
         emit("status", status_payload)
 
-        # encode processed frame and send back
+        # encode processed_frame and send back
         _, buf = cv2.imencode(".jpg", processed_frame)
         processed_b64 = base64.b64encode(buf).decode("utf-8")
         emit("processed_frame", processed_b64)

@@ -219,16 +219,18 @@ def analyze_face(frame):
 def on_connect():
     sid = request.sid
     # Initialize client state including violation_count and disqualified flag
+    client_type = request.args.get('client_type', 'unknown')
     clients[sid] = {
         'head_counter': 0, 
         'gaze_counter': 0, 
         'violation_count': 0,
         'disqualified': False,
         'exam_active': False,
-        'last_seen': time.time()
+        'last_seen': time.time(),
+        'client_type': client_type
     }
-    print(f"[CONNECT] {sid}")
-    log_event(sid, "connect", "client connected")
+    print(f"[CONNECT] {sid} (Type: {client_type})")
+    log_event(sid, "connect", f"client connected ({client_type})")
     emit("connected", {"message": "connected", "sid": sid})
 
 @socketio.on("disconnect")
@@ -259,7 +261,8 @@ def receive_frame(base64_data):
             'violation_count': 0,
             'disqualified': False,
             'exam_active': False,
-            'last_seen': time.time()
+            'last_seen': time.time(),
+            'client_type': 'unknown'
         }
     
     clients[sid]['last_seen'] = time.time()
@@ -358,7 +361,14 @@ def receive_frame(base64_data):
         # encode processed_frame and send back
         _, buf = cv2.imencode(".jpg", processed_frame)
         processed_b64 = base64.b64encode(buf).decode("utf-8")
-        emit("processed_frame", processed_b64)
+        
+        if clients[sid].get('client_type') == 'web':
+            emit("processed_frame", {
+                "image": processed_b64,
+                "num_faces": num_faces
+            })
+        else:
+            emit("processed_frame", processed_b64)
 
     except Exception as e:
         print("ERROR processing frame:", e)
